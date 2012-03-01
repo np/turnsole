@@ -490,3 +490,10 @@ class Iconv
     end
   end
 end
+
+module Enumerable
+  ## returns all the entries which are equal to startline up to endline
+  def between startline, endline
+    select { |l| true if l == startline .. l == endline }
+  end
+end

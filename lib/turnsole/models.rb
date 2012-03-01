@@ -82,6 +82,7 @@ module HasState
   def attachment?; has_state?("attachment") end
   def unread?; has_state?("unread") end
   def draft?; has_state?("draft") end
+  def signed?; has_state?("signed") end
 end
 
 class ThreadSummary

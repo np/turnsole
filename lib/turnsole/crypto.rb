@@ -43,11 +43,12 @@ from_key: the key that generated the signature (class is GPGME::Key)
 Return value: an array of lines of output
 EOS
 
-  def initialize
+  def initialize context
+    @context = context
     # test if the gpgme gem is available
     @gpgme_present = begin
       begin
-        GPGME.check_version :protocol => GPGME::PROTOCOL_OpenPGP
+        GPGME::Engine.check_version(GPGME::PROTOCOL_OpenPGP)
       rescue GPGME::Error
         false
       end
@@ -135,7 +136,7 @@ EOS
     signed_data, plain_data = if detached
       [GPGME::Data.from_str(format_payload(payload)), nil]
     else
-      [nil, GPGME::Data.empty]
+      [nil, GPGME::Data.empty!]
     end
     begin
       ctx.verify(sig_data, signed_data, plain_data)
@@ -231,6 +232,8 @@ private
     sig_from = if signatures.size > 0
       signatures.first.to_s.sub(/from [0-9A-F]{16} /, "from ")
     end
+    @context.logger.debug "sig_from = #{sig_from}"
+    @context.logger.debug "output = #{output}"
 
     if output.length == 0
       Chunk::CryptoNotice.new :valid, "Encrypted but unsigned message", output
@@ -277,7 +280,10 @@ private
       ## first list all the uids
       if from_key.uids.length > 1
         aka_list = from_key.uids[1..-1]
-        aka_list.each { |aka| output_lines << '                aka "' + aka.uid + '"' }
+        aka_list.each do |aka|
+          uid = aka.uid.safely_mark_encoding! 'UTF-8'
+          output_lines << '                aka "' + uid + '"'
+        end
       end
 
       ## now we want to look at the trust of that key

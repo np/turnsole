@@ -109,7 +109,7 @@ EOS
     @client = Client.new self, (override_url || @config.heliotrope_url)
     @accounts = Accounts.new @config.accounts
     @labels = Labels.new self
-    @crypto = Crypto.new
+    @crypto = Crypto.new self
     @contacts = Contacts.new self
   end
 

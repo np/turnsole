@@ -1,4 +1,6 @@
 require 'tempfile'
+require 'rmail'
+require 'heliotrope/decoder'
 
 ## Here we define all the "chunks" that a message is parsed into. Chunks are
 ## used by ThreadViewMode to render a message. Chunks are used for both MIME
@@ -326,6 +328,7 @@ EOS
     def quotable?; false end
     def expandable?; !@lines.empty? end
     def viewable?; false end
+    def initial_state; :closed end
   end
 end
 
@@ -347,7 +350,121 @@ class ChunkParser
     @context = context
   end
 
+  def inline_gpg_to_chunks body, orig_charset
+    lines = body.split("\n")
+
+    # Handle signed PGP/INLINE messages.
+    gpg = lines.between(GPG_SIGNED_START, GPG_SIGNED_END)
+    if !gpg.empty?
+      # Create an RMail::Message object with the whole message (content and
+      # armor signature) to pass it to verify_signature_chunk.
+      msg = RMail::Message.new
+      msg.body = gpg.join("\n")
+
+      # Interpret the raw body lines with the charset from the email header.
+      body = Heliotrope::Decoder.transcode 'UTF-8', orig_charset, body
+      lines = body.split("\n")
+
+      # Chunks before and after the signed part of this message.
+      startidx = lines.index(GPG_SIGNED_START)
+      endidx = lines.index(GPG_SIG_END)
+      before = startidx != 0 ? lines[0 .. startidx-1] : []
+      after = endidx ? lines[endidx+1 .. lines.size] : []
+
+      # Create an RMail::Message object for the payload itself.
+      payload = RMail::Message.new
+      sig = lines.between(GPG_SIGNED_START, GPG_SIG_START)
+      payload.body = sig[1, sig.size-2].join("\n")
+
+      return [text_to_chunks(before),
+              @context.crypto.verify_signature_chunk(payload, msg, false),
+              text_to_chunks(sig[1, sig.size-2]),
+              text_to_chunks(after)].flatten
+    end
+
+    # Handle encrypted PGP/INLINE messages.
+    # TODO: There needs to be a new message state called 'encrypted' first,
+    # this code never gets invoked currently.
+    #gpg = lines.between(GPG_START, GPG_END)
+    ## between does not check if GPG_END actually exists
+    #if !gpg.empty? && !lines.index(GPG_END).nil?
+    #  msg = RMail::Message.new
+    #  msg.body = gpg.join("\n")
+
+    #  startidx = lines.index(GPG_START)
+    #  before = startidx != 0 ? lines[0 .. startidx-1] : []
+    #  after = lines[lines.index(GPG_END)+1 .. lines.size]
+
+    #  notice, sig, decryptedm = CryptoManager.decrypt msg, true
+    #  chunks = if decryptedm # managed to decrypt
+    #    children = message_to_chunks(decryptedm, true)
+    #    [notice, sig].compact + children
+    #  else
+    #    [notice]
+    #  end
+    #  return [text_to_chunks(before, false),
+    #          chunks,
+    #          text_to_chunks(after, false)].flatten.compact
+    #end
+  end
+
+  def multipart_signed_to_chunks m
+    if m.body.size != 2
+      @context.logger.warn "multipart/signed with #{m.body.size} parts (expecting 2)"
+      return
+    end
+
+    payload, signature = m.body
+    if signature.multipart?
+      @context.logger.warn "multipart/signed with payload multipart #{payload.multipart?} and signature multipart #{signature.multipart?}"
+      return
+    end
+
+    ## this probably will never happen
+    if payload.header.content_type && payload.header.content_type.downcase == "application/pgp-signature"
+      @context.logger.warn "multipart/signed with payload content type #{payload.header.content_type}"
+      return
+    end
+
+    if signature.header.content_type && signature.header.content_type.downcase != "application/pgp-signature"
+      ## unknown signature type; just ignore.
+      #warn "multipart/signed with signature content type #{signature.header.content_type}"
+      return
+    end
+
+    [@context.crypto.verify_signature_chunk(payload, signature),
+     text_to_chunks(payload.decode.normalize_whitespace.split("\n"))].flatten
+  end
+
+  # Since a message can be signed in multiple different ways, this function
+  # figures out which way is appropriate, verifies the signature and returns a
+  # signature chunk in addition to the message chunks.
+  def chunks_for_signed message
+    @context.logger.debug "Handling signed message (Message-ID #{message.message_id})"
+
+    # We need to download the raw version of the message because heliotrope
+    # MIME-decodes the message parts.
+    raw_message = @context.client.raw_message message.message_id
+
+    # TODO: Hier kriege ich eine SystemStackException wegen idiotischer
+    # Regexp-generation in rmail/parser/multipart.rb:212
+    m = RMail::Parser.read(raw_message)
+
+    # Either a MIME multipart/signed or a multipart/mixed message.
+    if m.multipart?
+      return multipart_signed_to_chunks m
+    else
+      # Not a MIME message but signed, must be PGP/INLINE.
+      body = m.body ? m.decode : ""
+      content_type = m.header['Content-Type']
+      source_charset = if content_type =~ /charset="?(.*?)"?(;|$)/i then $1 else "US-ASCII" end
+      return inline_gpg_to_chunks body, source_charset
+    end
+  end
+
   def chunks_for message
+    return chunks_for_signed(message) if message.signed?
+
     message.parts.map_with_index do |hash, i|
       case hash["type"]
       when /^text\/html/
