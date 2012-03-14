@@ -58,7 +58,7 @@ EOS
 
     if @gpgme_present
       if (bin = `which gpg2`.chomp) =~ /\S/
-        GPGME.set_engine_info GPGME::PROTOCOL_OpenPGP, bin, nil
+        GPGME::Engine.set_info GPGME::PROTOCOL_OpenPGP, bin, nil
       end
     end
   end
